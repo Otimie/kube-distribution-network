@@ -1,0 +1,52 @@
+# Example configuration.
+#
+# The proxy is read-only and deny-by-default. It reads the cluster with its own
+# service account while edge clients are unauthenticated, so anything in `rules`
+# is readable by anyone who can reach the proxy. Put nothing there whose
+# contents you would not publish.
+
+listen: ":8080"
+adminListen: ":9090"
+
+upstream:
+  server: "https://kubernetes.default.svc"
+  caFile: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+  tokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+  timeout: "30s"
+
+# Total body budget for the response cache.
+cacheMaxBytes: 536870912 # 512 MiB
+
+# Ceiling on simultaneous requests to the API server. With request coalescing,
+# this is what bounds API server load however much traffic arrives at the edge.
+upstreamConcurrency: 32
+
+# Readable resources. `ttl` becomes max-age: a 30s ttl means the API server sees
+# at most a couple of requests a minute for that resource, whatever the fleet
+# size.
+rules:
+  - group: ""
+    version: v1
+    resource: nodes
+    ttl: "30s"
+
+  - group: ""
+    version: v1
+    resource: services
+    ttl: "30s"
+
+  # Restricting namespaces also refuses cluster-wide reads of this resource,
+  # since those would return objects from every namespace.
+  - group: ""
+    version: v1
+    resource: configmaps
+    namespaces: ["public", "fleet-*"]
+    ttl: "60s"
+
+  - group: apps
+    version: v1
+    resource: deployments
+    ttl: "30s"
+
+# Deliberately absent: secrets, serviceaccounts, and anything else whose
+# contents are credentials.

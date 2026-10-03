@@ -1,0 +1,10 @@
+name = "kdn-edge"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+# Replace with the hostname that fronts your proxy origin.
+routes = [
+  { pattern = "k8s.example.com/*", zone_name = "example.com" }
+]
+
+# No bindings are needed: the Worker is stateless and uses the built-in cache.

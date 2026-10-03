@@ -1,0 +1,177 @@
+# Deployment manifests.
+#
+# The ClusterRole and the proxy's own `rules` say the same thing twice, on
+# purpose: the allowlist is what the proxy enforces, RBAC is what the API server
+# enforces. Keep both as narrow as the fleet actually needs.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kdn
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kdn
+  namespace: kdn
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kdn-reader
+# Deliberately grants no nonResourceURLs. That omission is what makes the API
+# server refuse /metrics, /logs and /debug/pprof for this account, which the
+# proxy forwards rather than filtering itself. Note that the built-in
+# system:discovery and system:public-info-viewer bindings still allow discovery,
+# /healthz and /version to any authenticated account.
+rules:
+  # Only get and list -- never watch, never a mutating verb.
+  - apiGroups: [""]
+    resources: ["nodes", "services", "configmaps"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kdn-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kdn-reader
+subjects:
+  - kind: ServiceAccount
+    name: kdn
+    namespace: kdn
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kdn-config
+  namespace: kdn
+data:
+  config.yaml: |
+    listen: ":8080"
+    adminListen: ":9090"
+
+    upstream:
+      server: "https://kubernetes.default.svc"
+      caFile: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+      tokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+      timeout: "30s"
+
+    cacheMaxBytes: 536870912
+    upstreamConcurrency: 32
+
+    rules:
+      - group: ""
+        version: v1
+        resource: nodes
+        ttl: "30s"
+      - group: ""
+        version: v1
+        resource: services
+        ttl: "30s"
+      - group: ""
+        version: v1
+        resource: configmaps
+        namespaces: ["public", "fleet-*"]
+        ttl: "60s"
+      - group: apps
+        version: v1
+        resource: deployments
+        ttl: "30s"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kdn
+  namespace: kdn
+  labels:
+    app.kubernetes.io/name: kdn
+spec:
+  # Each replica keeps its own cache, so replicas multiply worst-case API server
+  # load on a cold start. Keep the count modest and let the CDN do the fan-out.
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kdn
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kdn
+    spec:
+      serviceAccountName: kdn
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: kdn
+          # Pinned to a tag rather than :latest so a rollout is deliberate.
+          image: 123456789012.dkr.ecr.ap-southeast-4.amazonaws.com/kube-distribution-network:v0.1.0
+          args: ["-config", "/etc/kdn/config.yaml"]
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: admin
+              containerPort: 9090
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 200m
+              # Must leave headroom above cacheMaxBytes, or the container is
+              # killed as the cache fills.
+              memory: 768Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+            periodSeconds: 10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kdn
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: kdn-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kdn
+  namespace: kdn
+spec:
+  selector:
+    app.kubernetes.io/name: kdn
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kdn
+  namespace: kdn
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kdn
