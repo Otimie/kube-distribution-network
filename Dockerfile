@@ -1,5 +1,7 @@
 # Build stage.
-FROM golang:1.27-alpine AS build
+# Runs on the build host's own architecture and cross-compiles, so building for
+# another platform needs no emulation.
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 
 WORKDIR /src
 
@@ -11,9 +13,11 @@ COPY cmd/ cmd/
 COPY internal/ internal/
 
 ARG VERSION=dev
+ARG TARGETOS
+ARG TARGETARCH
 
 # CGO is disabled so the result is a static binary that runs on a scratch base.
-RUN CGO_ENABLED=0 GOFLAGS=-trimpath \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOFLAGS=-trimpath \
     go build -ldflags "-s -w -X main.version=${VERSION}" -o /out/kdn ./cmd/kdn
 
 # Runtime stage.
