@@ -75,8 +75,21 @@ which path prefixes reach the origin at all.
 make lint          # fmt, vet, test
 make build
 make push VERSION=v0.1.0   # builds and pushes to ECR
+```
 
-# Edit the image reference and the allowlist first.
+Alternatively, GitHub Actions builds a multi-arch (amd64/arm64) image on every
+tag push and pushes it to GHCR:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0   # triggers the workflow
+# ghcr.io/otimie/kube-distribution-network:v0.1.0 (and :latest)
+# main branch builds are tagged with the short SHA and :main
+```
+
+Edit the image reference and the allowlist in `deploy/kubernetes.yaml` first,
+then:
+
+```sh
 kubectl apply -f deploy/kubernetes.yaml
 ```
 
