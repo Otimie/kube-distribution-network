@@ -4,6 +4,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"os"
 	"time"
 
@@ -43,6 +44,9 @@ type Config struct {
 	// Optional: with no certificate configured, Listen serves plain HTTP. The
 	// admin port is never TLS; it is for in-cluster probes only.
 	TLS TLS `yaml:"tls"`
+
+	// CORS lets browser pages on other origins read responses. Off by default.
+	CORS CORS `yaml:"cors"`
 
 	// CacheMaxBytes is the response cache's total body budget. Entries are
 	// evicted least-recently-used above it.
@@ -90,6 +94,14 @@ type TLS struct {
 
 // Enabled reports whether the public listener serves TLS.
 func (t TLS) Enabled() bool { return t.CertFile != "" }
+
+// CORS configures cross-origin reads from browsers.
+type CORS struct {
+	// AllowedOrigin is one origin like "https://dashboard.example.com", or "*"
+	// for any. Empty turns CORS off. There is deliberately no list: allowing
+	// several would make responses vary by Origin, which the CDN cache ignores.
+	AllowedOrigin string `yaml:"allowedOrigin"`
+}
 
 // Rule makes one resource type readable.
 type Rule struct {
@@ -174,6 +186,16 @@ func (c *Config) Validate() error {
 	}
 	if c.TLS.ClientCAFile != "" && !c.TLS.Enabled() {
 		return fmt.Errorf("tls.clientCAFile requires tls.certFile and tls.keyFile: mutual TLS needs TLS")
+	}
+	if o := c.CORS.AllowedOrigin; o != "" && o != "*" {
+		// Browsers compare the header byte-for-byte with their own origin, so a
+		// trailing slash or path would silently never match.
+		u, err := url.Parse(o)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+			u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" ||
+			u.String() != o {
+			return fmt.Errorf("cors.allowedOrigin: %q is not an origin like https://example.com", o)
+		}
 	}
 	if len(c.Rules) == 0 {
 		return fmt.Errorf("rules is empty: the proxy is deny-by-default and would serve nothing")

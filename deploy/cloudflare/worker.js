@@ -57,7 +57,9 @@ export default {
   async fetch(request, _env, ctx) {
     const url = new URL(request.url);
 
-    if (request.method !== "GET" && request.method !== "HEAD") {
+    const preflight =
+      request.method === "OPTIONS" && request.headers.has("access-control-request-method");
+    if (request.method !== "GET" && request.method !== "HEAD" && !preflight) {
       return status(405, "MethodNotAllowed", `this endpoint is read-only; ${request.method} is not supported`);
     }
 
@@ -66,6 +68,14 @@ export default {
     );
     if (!onSurface) {
       return status(404, "NotFound", `the path ${url.pathname} is not served here`);
+    }
+
+    // A CORS preflight goes to the origin uncached: it answers when
+    // cors.allowedOrigin is set and refuses it otherwise. It carries no body.
+    if (preflight) {
+      const headers = new Headers(request.headers);
+      for (const h of ["authorization", "cookie"]) headers.delete(h);
+      return fetch(url.origin + url.pathname, { method: "OPTIONS", headers, redirect: "manual" });
     }
 
     // A watch is an open-ended stream no cache can serve.

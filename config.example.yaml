@@ -24,6 +24,12 @@ tls:
   # signed by this CA are refused, so only the CDN can reach the origin.
   clientCAFile: ""   # e.g. /etc/kdn-tls/client-ca.crt
 
+# Optional CORS, so a browser page on another origin can read responses. Empty
+# means off. One origin, or "*" for any; there is no list, because responses
+# varying by Origin would be mixed up by the CDN cache.
+cors:
+  allowedOrigin: ""   # e.g. https://dashboard.example.com
+
 # Total body budget for the response cache.
 cacheMaxBytes: 536870912 # 512 MiB
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/example/kube-distribution-network/internal/cache"
 	"github.com/example/kube-distribution-network/internal/config"
+	"github.com/example/kube-distribution-network/internal/cors"
 	"github.com/example/kube-distribution-network/internal/proxy"
 	"github.com/example/kube-distribution-network/internal/servertls"
 	"github.com/example/kube-distribution-network/internal/upstream"
@@ -71,7 +72,7 @@ func run() error {
 
 	public := &http.Server{
 		Addr:      cfg.Listen,
-		Handler:   proxy.New(cfg, responseCache, up, log),
+		Handler:   cors.Wrap(proxy.New(cfg, responseCache, up, log), cfg.CORS.AllowedOrigin),
 		TLSConfig: tlsConfig,
 		// Includes TLS handshake failures, e.g. a client without a certificate
 		// when mTLS is on; keep them in the structured log.

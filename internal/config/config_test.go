@@ -114,10 +114,35 @@ rules:
     resource: nodes
     ttl: "30s"
 `,
+		"cors origin with trailing slash": `
+cors:
+  allowedOrigin: https://dashboard.example.com/
+rules:
+  - version: v1
+    resource: nodes
+    ttl: "30s"
+`,
+		"cors origin without scheme": `
+cors:
+  allowedOrigin: dashboard.example.com
+rules:
+  - version: v1
+    resource: nodes
+    ttl: "30s"
+`,
 	}
 	for name, body := range cases {
 		if _, err := loadString(t, body); err == nil {
 			t.Errorf("%s: expected a validation error", name)
+		}
+	}
+}
+
+func TestCORSOriginsAccepted(t *testing.T) {
+	for _, o := range []string{"*", "https://dashboard.example.com", "http://localhost:3000"} {
+		body := "cors:\n  allowedOrigin: \"" + o + "\"\nrules:\n  - version: v1\n    resource: nodes\n    ttl: \"30s\"\n"
+		if _, err := loadString(t, body); err != nil {
+			t.Errorf("allowedOrigin %q: %v", o, err)
 		}
 	}
 }

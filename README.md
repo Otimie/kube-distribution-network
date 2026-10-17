@@ -158,6 +158,29 @@ curl -sv https://origin.example.com:8080/version   # handshake fails: no client 
 curl -sv --cert client.crt --key client.key https://origin.example.com:8080/version  # 200
 ```
 
+### CORS for browser clients
+
+Off by default, and only needed for a browser page on another origin, such as a
+dashboard. `kubectl` and `client-go` don't use CORS. Set one origin:
+
+```yaml
+cors:
+  allowedOrigin: https://dashboard.example.com   # or "*"
+```
+
+The proxy then sends `Access-Control-Allow-Origin` on every response and answers
+preflights itself; the Worker passes preflights through uncached. It allows only
+`GET` and `HEAD`, and never credentials.
+
+Only one origin is supported. The headers have to be the same whatever the
+request's `Origin`, because the edge cache keeps one copy per URL and ignores
+`Vary: Origin`: a response tailored to one page would be served to another.
+Cached responses keep their old CORS headers until they expire, so a change
+takes up to the longest `ttl` to apply everywhere.
+
+CORS doesn't widen what's readable. Anything in `rules` is already public to
+anyone who can reach the proxy; it only lets pages on that origin read it too.
+
 ### Verify
 
 ```sh
@@ -204,6 +227,7 @@ internal/proxy/       path parsing, allowlist checks, cache headers
 internal/cache/       size-bounded LRU with staleness windows
 internal/upstream/    API client: coalescing, concurrency ceiling
 internal/servertls/   optional TLS / mTLS for the public listener
+internal/cors/        optional CORS wrapper around the proxy handler
 deploy/kubernetes.yaml  manifests, RBAC mirroring the allowlist
 deploy/cloudflare/      the Worker
 ```
