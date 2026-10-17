@@ -14,6 +14,16 @@ upstream:
   tokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token"
   timeout: "30s"
 
+# Optional TLS on `listen`, for the hop between the CDN and this origin. Leave
+# certFile and keyFile empty to serve plain HTTP. The files are re-read when they
+# change, so rotation needs no restart. The admin port is always plain HTTP.
+tls:
+  certFile: ""   # e.g. /etc/kdn-tls/tls.crt
+  keyFile: ""    # e.g. /etc/kdn-tls/tls.key
+  # Setting this turns on mutual TLS: connections without a client certificate
+  # signed by this CA are refused, so only the CDN can reach the origin.
+  clientCAFile: ""   # e.g. /etc/kdn-tls/client-ca.crt
+
 # Total body budget for the response cache.
 cacheMaxBytes: 536870912 # 512 MiB
 

@@ -62,6 +62,13 @@ data:
       tokenFile: "/var/run/secrets/kubernetes.io/serviceaccount/token"
       timeout: "30s"
 
+    # Optional TLS / mutual TLS between the CDN and this origin. To enable,
+    # uncomment this and the kdn-tls volume in the Deployment below.
+    # tls:
+    #   certFile: /etc/kdn-tls/tls.crt
+    #   keyFile: /etc/kdn-tls/tls.key
+    #   clientCAFile: /etc/kdn-tls/client-ca.crt   # omit for TLS without mTLS
+
     cacheMaxBytes: 536870912
     upstreamConcurrency: 32
 
@@ -147,10 +154,22 @@ spec:
             - name: config
               mountPath: /etc/kdn
               readOnly: true
+            # - name: tls
+            #   mountPath: /etc/kdn-tls
+            #   readOnly: true
       volumes:
         - name: config
           configMap:
             name: kdn-config
+        # A kubernetes.io/tls Secret, e.g. from cert-manager or a Cloudflare
+        # Origin CA certificate, plus the client CA for mTLS:
+        #   kubectl -n kdn create secret generic kdn-tls \
+        #     --from-file=tls.crt --from-file=tls.key --from-file=client-ca.crt
+        # Mount it as a Secret volume, not with subPath: subPath mounts never see
+        # updates, so a rotated certificate would not be picked up.
+        # - name: tls
+        #   secret:
+        #     secretName: kdn-tls
 ---
 apiVersion: v1
 kind: Service

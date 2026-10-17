@@ -118,6 +118,46 @@ Also worth setting, in the Cloudflare dashboard:
 - **Rate limiting**: per-IP, e.g. 100 requests / 10s. This has to be at the
   edge — the origin only ever sees Cloudflare's addresses.
 
+### TLS and mTLS between the CDN and the origin
+
+Optional, and off by default. Without it the CDN-to-origin hop is plain HTTP:
+anyone on that path can alter a response the CDN then caches and serves to the
+whole fleet, and anyone who finds the origin's address can skip the Worker and
+the edge rate limits entirely.
+
+Configured under `tls` (see `config.example.yaml`):
+
+- `certFile` + `keyFile` — serve TLS on `listen`. TLS 1.2 minimum. The pair is
+  re-checked every 30s and reloaded when it changes, so cert-manager rotation
+  needs no restart; a half-written rotation keeps the old pair in service.
+- `clientCAFile` — additionally require a client certificate signed by this CA
+  (mutual TLS). Only the CDN can then complete a handshake. Read at startup.
+
+The admin port (`/healthz`, `/stats`) stays plain HTTP for kubelet probes. It
+must not be exposed outside the cluster.
+
+On Cloudflare:
+
+1. **Origin certificate.** Issue one under *SSL/TLS → Origin Server* (or use
+   any certificate valid for the origin hostname), put it in the `kdn-tls`
+   Secret, and uncomment the `tls` blocks in `deploy/kubernetes.yaml`. Point the
+   Service or load balancer at port 8080 as TLS.
+2. **SSL/TLS mode: Full (strict).** Anything weaker means Cloudflare does not
+   verify the origin certificate, which forfeits most of the point.
+3. **Authenticated Origin Pulls** for mTLS. Prefer *per-hostname* pulls with a
+   client certificate you issue yourself, and set `clientCAFile` to your CA.
+   The zone-level option uses a certificate shared by every Cloudflare
+   customer, so trusting its CA only proves the request came through
+   *some* Cloudflare account — anyone can point their own zone at your origin
+   and bypass your Worker and rate limits.
+
+Check it from outside the CDN:
+
+```sh
+curl -sv https://origin.example.com:8080/version   # handshake fails: no client cert
+curl -sv --cert client.crt --key client.key https://origin.example.com:8080/version  # 200
+```
+
 ### Verify
 
 ```sh
@@ -163,6 +203,7 @@ internal/config/      config and the resource allowlist
 internal/proxy/       path parsing, allowlist checks, cache headers
 internal/cache/       size-bounded LRU with staleness windows
 internal/upstream/    API client: coalescing, concurrency ceiling
+internal/servertls/   optional TLS / mTLS for the public listener
 deploy/kubernetes.yaml  manifests, RBAC mirroring the allowlist
 deploy/cloudflare/      the Worker
 ```

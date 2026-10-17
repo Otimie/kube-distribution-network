@@ -18,6 +18,7 @@ import (
 	"github.com/example/kube-distribution-network/internal/cache"
 	"github.com/example/kube-distribution-network/internal/config"
 	"github.com/example/kube-distribution-network/internal/proxy"
+	"github.com/example/kube-distribution-network/internal/servertls"
 	"github.com/example/kube-distribution-network/internal/upstream"
 )
 
@@ -61,11 +62,20 @@ func run() error {
 		return err
 	}
 
+	tlsConfig, err := servertls.New(cfg.TLS)
+	if err != nil {
+		return err
+	}
+
 	responseCache := cache.New(cfg.CacheMaxBytes)
 
 	public := &http.Server{
-		Addr:    cfg.Listen,
-		Handler: proxy.New(cfg, responseCache, up, log),
+		Addr:      cfg.Listen,
+		Handler:   proxy.New(cfg, responseCache, up, log),
+		TLSConfig: tlsConfig,
+		// Includes TLS handshake failures, e.g. a client without a certificate
+		// when mTLS is on; keep them in the structured log.
+		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 		// ReadHeaderTimeout is what makes a slowloris attack expensive.
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -98,14 +108,22 @@ func run() error {
 	}
 
 	log.Info("starting", "version", version, "listen", cfg.Listen,
-		"adminListen", cfg.AdminListen, "upstream", cfg.Upstream.Server, "rules", len(cfg.Rules))
+		"adminListen", cfg.AdminListen, "upstream", cfg.Upstream.Server, "rules", len(cfg.Rules),
+		"tls", cfg.TLS.Enabled(), "mtls", cfg.TLS.ClientCAFile != "")
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	errCh := make(chan error, 2)
 	serve := func(name string, s *http.Server) {
-		if err := s.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		var err error
+		if s.TLSConfig != nil {
+			// The certificate comes from TLSConfig.GetCertificate, so no files here.
+			err = s.ListenAndServeTLS("", "")
+		} else {
+			err = s.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- fmt.Errorf("%s listener: %w", name, err)
 		}
 	}

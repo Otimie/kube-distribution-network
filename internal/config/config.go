@@ -39,6 +39,11 @@ type Config struct {
 
 	Upstream Upstream `yaml:"upstream"`
 
+	// TLS secures the Listen port, the hop between the CDN and this origin.
+	// Optional: with no certificate configured, Listen serves plain HTTP. The
+	// admin port is never TLS; it is for in-cluster probes only.
+	TLS TLS `yaml:"tls"`
+
 	// CacheMaxBytes is the response cache's total body budget. Entries are
 	// evicted least-recently-used above it.
 	CacheMaxBytes int64 `yaml:"cacheMaxBytes"`
@@ -66,6 +71,25 @@ type Upstream struct {
 
 	Timeout Duration `yaml:"timeout"`
 }
+
+// TLS configures the public listener's TLS and, optionally, mutual TLS.
+type TLS struct {
+	// CertFile and KeyFile are the serving certificate and key, PEM-encoded.
+	// Setting both turns on TLS. They are re-read when they change on disk, so
+	// a rotated certificate (e.g. by cert-manager) is picked up without a
+	// restart.
+	CertFile string `yaml:"certFile"`
+	KeyFile  string `yaml:"keyFile"`
+
+	// ClientCAFile turns on mutual TLS: every connection must present a client
+	// certificate signed by a CA in this PEM bundle, or the handshake fails.
+	// Use it to accept traffic only from the CDN (on Cloudflare, Authenticated
+	// Origin Pulls). Read once at startup.
+	ClientCAFile string `yaml:"clientCAFile"`
+}
+
+// Enabled reports whether the public listener serves TLS.
+func (t TLS) Enabled() bool { return t.CertFile != "" }
 
 // Rule makes one resource type readable.
 type Rule struct {
@@ -144,6 +168,12 @@ func (c *Config) Validate() error {
 	}
 	if c.CacheMaxBytes < 1 {
 		return fmt.Errorf("cacheMaxBytes must be positive")
+	}
+	if (c.TLS.CertFile == "") != (c.TLS.KeyFile == "") {
+		return fmt.Errorf("tls.certFile and tls.keyFile must be set together")
+	}
+	if c.TLS.ClientCAFile != "" && !c.TLS.Enabled() {
+		return fmt.Errorf("tls.clientCAFile requires tls.certFile and tls.keyFile: mutual TLS needs TLS")
 	}
 	if len(c.Rules) == 0 {
 		return fmt.Errorf("rules is empty: the proxy is deny-by-default and would serve nothing")

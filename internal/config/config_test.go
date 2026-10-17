@@ -98,6 +98,22 @@ rules:
     resource: nodes
     ttl: "60s"
 `,
+		"tls cert without key": `
+tls:
+  certFile: /tls/tls.crt
+rules:
+  - version: v1
+    resource: nodes
+    ttl: "30s"
+`,
+		"mtls without tls": `
+tls:
+  clientCAFile: /tls/ca.crt
+rules:
+  - version: v1
+    resource: nodes
+    ttl: "30s"
+`,
 	}
 	for name, body := range cases {
 		if _, err := loadString(t, body); err == nil {
