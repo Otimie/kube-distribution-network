@@ -30,11 +30,11 @@ func serve(h http.Handler, method, origin string, extra map[string]string) *http
 }
 
 func TestOffByDefault(t *testing.T) {
-	w := serve(Wrap(next, ""), http.MethodGet, "https://a.example", nil)
+	w := serve(Wrap(next, "", false), http.MethodGet, "https://a.example", nil)
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Errorf("Access-Control-Allow-Origin = %q with CORS off", got)
 	}
-	pre := serve(Wrap(next, ""), http.MethodOptions, "https://a.example",
+	pre := serve(Wrap(next, "", false), http.MethodOptions, "https://a.example",
 		map[string]string{"Access-Control-Request-Method": "GET"})
 	if pre.Code != http.StatusMethodNotAllowed {
 		t.Errorf("preflight with CORS off: status %d, want 405 from the proxy", pre.Code)
@@ -42,7 +42,7 @@ func TestOffByDefault(t *testing.T) {
 }
 
 func TestGetCarriesHeaders(t *testing.T) {
-	h := Wrap(next, "https://dash.example")
+	h := Wrap(next, "https://dash.example", false)
 	w := serve(h, http.MethodGet, "https://dash.example", nil)
 	if w.Code != http.StatusOK || w.Body.String() != "ok" {
 		t.Fatalf("GET: %d %q", w.Code, w.Body.String())
@@ -60,7 +60,7 @@ func TestGetCarriesHeaders(t *testing.T) {
 
 // The CDN caches one copy per URL, so the headers must not depend on who asked.
 func TestHeadersIndependentOfOrigin(t *testing.T) {
-	h := Wrap(next, "https://dash.example")
+	h := Wrap(next, "https://dash.example", false)
 	for _, origin := range []string{"", "https://dash.example", "https://evil.example"} {
 		w := serve(h, http.MethodGet, origin, nil)
 		if got := w.Header().Get("Access-Control-Allow-Origin"); got != "https://dash.example" {
@@ -73,7 +73,7 @@ func TestHeadersIndependentOfOrigin(t *testing.T) {
 }
 
 func TestPreflight(t *testing.T) {
-	w := serve(Wrap(next, "*"), http.MethodOptions, "https://dash.example",
+	w := serve(Wrap(next, "*", false), http.MethodOptions, "https://dash.example",
 		map[string]string{"Access-Control-Request-Method": "GET"})
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("preflight status %d, want 204", w.Code)
@@ -91,8 +91,26 @@ func TestPreflight(t *testing.T) {
 
 // A bare OPTIONS is not a preflight; the read-only proxy still refuses it.
 func TestBareOptionsReachesProxy(t *testing.T) {
-	w := serve(Wrap(next, "*"), http.MethodOptions, "", nil)
+	w := serve(Wrap(next, "*", false), http.MethodOptions, "", nil)
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("bare OPTIONS: status %d, want 405", w.Code)
+	}
+}
+
+func TestCredentials(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		h := Wrap(next, "https://dash.example", allow)
+		want := ""
+		if allow {
+			want = "true"
+		}
+		get := serve(h, http.MethodGet, "https://dash.example", nil)
+		pre := serve(h, http.MethodOptions, "https://dash.example",
+			map[string]string{"Access-Control-Request-Method": "GET"})
+		for name, w := range map[string]*httptest.ResponseRecorder{"GET": get, "preflight": pre} {
+			if got := w.Header().Get("Access-Control-Allow-Credentials"); got != want {
+				t.Errorf("allowCredentials %v, %s: Access-Control-Allow-Credentials = %q, want %q", allow, name, got, want)
+			}
+		}
 	}
 }

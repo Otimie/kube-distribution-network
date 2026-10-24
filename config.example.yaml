@@ -29,6 +29,9 @@ tls:
 # varying by Origin would be mixed up by the CDN cache.
 cors:
   allowedOrigin: ""   # e.g. https://dashboard.example.com
+  # Send Access-Control-Allow-Credentials: true, for pages that fetch with
+  # credentials (e.g. Headlamp). Needs a specific allowedOrigin, not "*".
+  allowCredentials: false
 
 # Total body budget for the response cache.
 cacheMaxBytes: 536870912 # 512 MiB

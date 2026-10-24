@@ -122,6 +122,23 @@ rules:
     resource: nodes
     ttl: "30s"
 `,
+		"cors credentials with any origin": `
+cors:
+  allowedOrigin: "*"
+  allowCredentials: true
+rules:
+  - version: v1
+    resource: nodes
+    ttl: "30s"
+`,
+		"cors credentials without origin": `
+cors:
+  allowCredentials: true
+rules:
+  - version: v1
+    resource: nodes
+    ttl: "30s"
+`,
 		"cors origin without scheme": `
 cors:
   allowedOrigin: dashboard.example.com
@@ -135,6 +152,17 @@ rules:
 		if _, err := loadString(t, body); err == nil {
 			t.Errorf("%s: expected a validation error", name)
 		}
+	}
+}
+
+func TestCORSCredentialsAccepted(t *testing.T) {
+	body := "cors:\n  allowedOrigin: https://dashboard.example.com\n  allowCredentials: true\nrules:\n  - version: v1\n    resource: nodes\n    ttl: \"30s\"\n"
+	cfg, err := loadString(t, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.CORS.AllowCredentials {
+		t.Error("cors.allowCredentials not parsed")
 	}
 }
 

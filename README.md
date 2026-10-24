@@ -170,7 +170,22 @@ cors:
 
 The proxy then sends `Access-Control-Allow-Origin` on every response and answers
 preflights itself; the Worker passes preflights through uncached. It allows only
-`GET` and `HEAD`, and never credentials.
+`GET` and `HEAD`.
+
+Some pages, such as Headlamp, fetch with `credentials: 'include'`, and browsers
+won't let them read the response without `Access-Control-Allow-Credentials:
+true`. Turn that on with `allowCredentials`, which needs a specific
+`allowedOrigin`, since browsers reject credentials with `"*"`:
+
+```yaml
+cors:
+  allowedOrigin: https://dashboard.example.com
+  allowCredentials: true
+```
+
+This only lets the page read responses. The proxy still ignores cookies and
+`Authorization`, and the Worker strips them, so the data is the same public
+data an anonymous request gets.
 
 Only one origin is supported. The headers have to be the same whatever the
 request's `Origin`, because the edge cache keeps one copy per URL and ignores

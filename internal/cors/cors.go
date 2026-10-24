@@ -20,20 +20,26 @@ var allowedHeaders = strings.Join([]string{"Accept", "If-None-Match"}, ", ")
 
 // Wrap returns next with CORS applied for allowedOrigin, an origin like
 // "https://dashboard.example.com" or "*". An empty allowedOrigin returns next
-// unchanged, so CORS stays off by default.
+// unchanged, so CORS stays off by default. allowCredentials adds
+// Access-Control-Allow-Credentials: true, for pages that fetch with
+// credentials; the caller must not combine it with "*", which browsers reject.
 //
 // The headers are the same on every response, whatever the request's Origin.
 // That is deliberate: the CDN caches one copy per URL and ignores Vary: Origin,
 // so a response that depended on Origin could be served to the wrong page.
 // Browsers on other origins still cannot read it, since the header names one
 // origin.
-func Wrap(next http.Handler, allowedOrigin string) http.Handler {
+func Wrap(next http.Handler, allowedOrigin string, allowCredentials bool) http.Handler {
 	if allowedOrigin == "" {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hdr := w.Header()
 		hdr.Set("Access-Control-Allow-Origin", allowedOrigin)
+		// Browsers check this on the preflight as well as the response.
+		if allowCredentials {
+			hdr.Set("Access-Control-Allow-Credentials", "true")
+		}
 
 		if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
 			hdr.Set("Access-Control-Allow-Methods", "GET, HEAD")

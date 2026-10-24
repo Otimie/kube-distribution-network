@@ -101,6 +101,13 @@ type CORS struct {
 	// for any. Empty turns CORS off. There is deliberately no list: allowing
 	// several would make responses vary by Origin, which the CDN cache ignores.
 	AllowedOrigin string `yaml:"allowedOrigin"`
+
+	// AllowCredentials sends Access-Control-Allow-Credentials: true, which
+	// browsers require before a page that fetches with credentials (cookies)
+	// may read the response. The proxy ignores client credentials, so this
+	// exposes nothing new. Needs a specific AllowedOrigin: browsers reject
+	// credentials with "*".
+	AllowCredentials bool `yaml:"allowCredentials"`
 }
 
 // Rule makes one resource type readable.
@@ -196,6 +203,9 @@ func (c *Config) Validate() error {
 			u.String() != o {
 			return fmt.Errorf("cors.allowedOrigin: %q is not an origin like https://example.com", o)
 		}
+	}
+	if c.CORS.AllowCredentials && (c.CORS.AllowedOrigin == "" || c.CORS.AllowedOrigin == "*") {
+		return fmt.Errorf("cors.allowCredentials requires cors.allowedOrigin to be one origin: browsers reject credentials with \"*\"")
 	}
 	if len(c.Rules) == 0 {
 		return fmt.Errorf("rules is empty: the proxy is deny-by-default and would serve nothing")

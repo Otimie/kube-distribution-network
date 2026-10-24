@@ -72,7 +72,7 @@ func run() error {
 
 	public := &http.Server{
 		Addr:      cfg.Listen,
-		Handler:   cors.Wrap(proxy.New(cfg, responseCache, up, log), cfg.CORS.AllowedOrigin),
+		Handler:   cors.Wrap(proxy.New(cfg, responseCache, up, log), cfg.CORS.AllowedOrigin, cfg.CORS.AllowCredentials),
 		TLSConfig: tlsConfig,
 		// Includes TLS handshake failures, e.g. a client without a certificate
 		// when mTLS is on; keep them in the structured log.
