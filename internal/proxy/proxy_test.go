@@ -494,3 +494,81 @@ func TestRequireLabelsHidesObjects(t *testing.T) {
 		t.Errorf("namespace list: upstream labelSelector = %q", got)
 	}
 }
+
+// Removed fields never reach the client or the cache, and the ETag follows the
+// served body rather than the original.
+func TestRemoveStripsFields(t *testing.T) {
+	f := newFakeAPIServer(t)
+	f.body = `{"kind":"NodeList","metadata":{"resourceVersion":"5"},"items":[` +
+		`{"metadata":{"name":"n1"},"status":{"images":[{"names":["registry/secret-app:v1"]}],"capacity":{"cpu":"4"}}}]}`
+	h := newTestHandler(t, f, func(c *config.Config) {
+		c.Rules = append(c.Rules, config.Rule{
+			Version: "v1", Resource: "nodes", TTL: config.Duration(30 * time.Second),
+			Remove: []string{"status.images"},
+		})
+	})
+
+	for _, want := range []string{"miss", "hit"} {
+		rec := do(h, http.MethodGet, "/api/v1/nodes", nil)
+		if rec.Code != http.StatusOK || rec.Header().Get("X-Kdn-Cache") != want {
+			t.Fatalf("got %d %s, want 200 %s", rec.Code, rec.Header().Get("X-Kdn-Cache"), want)
+		}
+		if strings.Contains(rec.Body.String(), "images") || !strings.Contains(rec.Body.String(), `"cpu":"4"`) {
+			t.Errorf("%s: body %s", want, rec.Body.String())
+		}
+		if got := rec.Header().Get("ETag"); got != upstream.ETag(rec.Body.Bytes()) {
+			t.Errorf("%s: ETag %s does not match the served body", want, got)
+		}
+	}
+
+	// A read by name is the object itself, not a list.
+	f.mu.Lock()
+	f.body = `{"kind":"Node","metadata":{"name":"n1"},"status":{"images":[],"capacity":{"cpu":"4"}}}`
+	f.mu.Unlock()
+	rec := do(h, http.MethodGet, "/api/v1/nodes/n1", nil)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "images") {
+		t.Errorf("by name: got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A rule that no longer fits the data refuses the response instead of serving
+// what it was meant to remove, and the refusal is not cached.
+func TestRemoveFailsClosed(t *testing.T) {
+	f := newFakeAPIServer(t)
+	f.body = `{"kind":"PodList","items":[{"spec":{"containers":{"name":"not-a-list","env":"SECRET=1"}}}]}`
+	h := newTestHandler(t, f, func(c *config.Config) {
+		c.Rules[0].Remove = []string{"spec.containers[*].env"}
+	})
+
+	for range 2 {
+		rec := do(h, http.MethodGet, "/api/v1/pods", nil)
+		if rec.Code != http.StatusBadGateway {
+			t.Fatalf("got %d, want 502", rec.Code)
+		}
+		if strings.Contains(rec.Body.String(), "SECRET") {
+			t.Errorf("unredacted data served: %s", rec.Body.String())
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("Cache-Control = %q, want no-store", cc)
+		}
+	}
+	if f.hits.Load() != 2 {
+		t.Errorf("API server saw %d requests, want 2: the refusal must not be cached", f.hits.Load())
+	}
+}
+
+// requireLabels is checked on the original object, so removing labels from
+// what is served does not hide everything.
+func TestRemoveAfterLabelCheck(t *testing.T) {
+	f := newFakeAPIServer(t)
+	f.body = `{"kind":"Pod","metadata":{"name":"web","labels":{"kdn.io/public":"true"}}}`
+	h := newTestHandler(t, f, func(c *config.Config) {
+		c.Rules[0].RequireLabels = map[string]string{"kdn.io/public": "true"}
+		c.Rules[0].Remove = []string{"metadata.labels"}
+	})
+
+	rec := do(h, http.MethodGet, "/api/v1/namespaces/default/pods/web", nil)
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "labels") {
+		t.Errorf("got %d %s", rec.Code, rec.Body.String())
+	}
+}

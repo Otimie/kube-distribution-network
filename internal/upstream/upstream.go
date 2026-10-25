@@ -226,14 +226,19 @@ func (c *Client) do(ctx context.Context, path, rawQuery string) (*Response, erro
 	if contentType == "" {
 		contentType = "application/json"
 	}
-	sum := sha256.Sum256(body)
 	return &Response{
 		Status:          resp.StatusCode,
 		Body:            body,
 		ContentType:     contentType,
 		ResourceVersion: resourceVersion(contentType, body),
-		ETag:            `"` + base64.RawURLEncoding.EncodeToString(sum[:16]) + `"`,
+		ETag:            ETag(body),
 	}, nil
+}
+
+// ETag is a strong validator over body.
+func ETag(body []byte) string {
+	sum := sha256.Sum256(body)
+	return `"` + base64.RawURLEncoding.EncodeToString(sum[:16]) + `"`
 }
 
 // acquire waits for an upstream slot.

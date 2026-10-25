@@ -276,6 +276,52 @@ spec:
 Narrow `resourceRules` to the resources your rules cover, and try it on a test
 cluster first: it applies to every matching write.
 
+### Removing fields
+
+A rule can strip fields from what it publishes. They're removed before caching,
+so neither the cache nor the CDN ever holds them:
+
+```yaml
+rules:
+  - group: ""
+    version: v1
+    resource: nodes
+    ttl: "30s"
+    remove:
+      - status.images
+      - status.nodeInfo
+      - metadata.managedFields
+      - metadata.annotations."kubectl.kubernetes.io/last-applied-configuration"
+```
+
+Paths start at the object; on a list, they apply to every item. Lists inside an
+object take a selector:
+
+| Path | Removes |
+| --- | --- |
+| `spec.containers[*].args` | `args` from every container |
+| `spec.containers[name: *].env[name: *].value` | every env var's value, keeping its name |
+| `spec.containers[name: app].env[name: DB_*]` | the `DB_*` env vars of container `app` entirely |
+
+`[key: pattern]` matches items whose `key` is a string matching the pattern,
+where `*` matches anything; items without the key don't match. `[*]` matches
+every item. Quote keys that contain dots.
+
+Removal **fails closed**. A field that isn't there is skipped, since there's
+nothing to leak. But if a path finds the wrong kind of value, such as a list
+where it expects an object, the rule no longer describes the data and the proxy
+returns a 502 rather than serve it unredacted. Check the proxy's log for
+`response could not be redacted`.
+
+`kind`, `apiVersion`, `metadata`, `metadata.name` and `metadata.namespace` can't
+be removed, since clients need them. `ETag` is computed from the served body,
+so it doesn't reveal changes to removed fields. `requireLabels` is checked
+before removal, so removing `metadata.labels` still works.
+
+Changing `remove` doesn't touch copies the CDN already holds. Most expire
+within the rule's `ttl`, but a read pinned to an exact `resourceVersion` is
+cached for a year, so purge the CDN cache after adding a path that matters.
+
 ### Verify
 
 ```sh
@@ -319,6 +365,7 @@ one-year `max-age`, so it's cached permanently.
 cmd/kdn/              entrypoint, both listeners, shutdown
 internal/config/      config and the resource allowlist
 internal/proxy/       path parsing, allowlist checks, cache headers
+internal/redact/      field paths and removal for `remove`
 internal/cache/       size-bounded LRU with staleness windows
 internal/upstream/    API client: coalescing, concurrency ceiling
 internal/servertls/   optional TLS / mTLS for the public listener

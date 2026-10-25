@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/example/kube-distribution-network/internal/redact"
 )
 
 // Duration wraps time.Duration so YAML can carry values like "30s".
@@ -140,6 +142,12 @@ type Rule struct {
 	// publishing to them. Guard the label keys with an admission policy.
 	RequireLabels map[string]string `yaml:"requireLabels"`
 
+	// Remove lists fields to strip from every object before it is cached, such
+	// as status.images on nodes. See package redact for the path syntax. A
+	// path that finds the wrong kind of value fails the response rather than
+	// serving it unredacted.
+	Remove []string `yaml:"remove"`
+
 	// TTL becomes max-age: how long the CDN and clients may serve this
 	// resource without revalidating. It is also the origin cache's freshness
 	// window. This is the main knob — a 30s TTL means the API server sees at
@@ -244,6 +252,11 @@ func (c *Config) Validate() error {
 			}
 			if !validLabelValue(v) {
 				return fmt.Errorf("rules[%d] (%s): requireLabels: %q is not a valid value for label %q", i, r.Resource, v, k)
+			}
+		}
+		for _, path := range r.Remove {
+			if _, err := redact.Parse(path); err != nil {
+				return fmt.Errorf("rules[%d] (%s): remove: %w", i, r.Resource, err)
 			}
 		}
 		key := r.Group + "/" + r.Version + "/" + r.Resource

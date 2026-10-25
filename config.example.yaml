@@ -44,10 +44,15 @@ upstreamConcurrency: 32
 # at most a couple of requests a minute for that resource, whatever the fleet
 # size.
 rules:
+  # `remove` strips fields before caching. Node image lists are large and name
+  # every image on the node; managedFields is bookkeeping no client needs.
   - group: ""
     version: v1
     resource: nodes
     ttl: "30s"
+    remove:
+      - status.images
+      - metadata.managedFields
 
   - group: ""
     version: v1

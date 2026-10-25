@@ -22,6 +22,7 @@ import (
 
 	"github.com/example/kube-distribution-network/internal/cache"
 	"github.com/example/kube-distribution-network/internal/config"
+	"github.com/example/kube-distribution-network/internal/redact"
 	"github.com/example/kube-distribution-network/internal/upstream"
 )
 
@@ -59,14 +60,24 @@ type Handler struct {
 
 	// rules is indexed by "group/resource".
 	rules map[string][]*config.Rule
+
+	// remove holds each rule's parsed remove paths.
+	remove map[*config.Rule][]*redact.Path
 }
 
 // New builds a Handler.
 func New(cfg *config.Config, c *cache.Cache, up *upstream.Client, log *slog.Logger) *Handler {
-	h := &Handler{cfg: cfg, cache: c, upstream: up, log: log, rules: map[string][]*config.Rule{}}
+	h := &Handler{cfg: cfg, cache: c, upstream: up, log: log,
+		rules: map[string][]*config.Rule{}, remove: map[*config.Rule][]*redact.Path{}}
 	for i := range cfg.Rules {
 		r := &cfg.Rules[i]
 		h.rules[r.Group+"/"+r.Resource] = append(h.rules[r.Group+"/"+r.Resource], r)
+		for _, s := range r.Remove {
+			// Validate has already parsed these.
+			if p, err := redact.Parse(s); err == nil {
+				h.remove[r] = append(h.remove[r], p)
+			}
+		}
 	}
 	return h
 }
@@ -97,28 +108,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ttl, labels, err := h.authorize(t)
+	ttl, rule, err := h.authorize(t)
 	if err != nil {
 		writeStatus(w, http.StatusForbidden, "Forbidden", err.Error())
 		return
 	}
 
 	query := r.URL.Query()
-	var gate *labelGate
-	if len(labels) > 0 {
+	shape := &shaping{list: t.name == "", remove: h.remove[rule]}
+	if rule != nil && len(rule.RequireLabels) > 0 {
+		labels := rule.RequireLabels
 		if t.name == "" {
 			// A list: the API server filters it, so pagination and
 			// remainingItemCount stay correct for the published set.
 			requireLabels(query, labels)
 		} else {
-			gate = &labelGate{labels: labels, notFound: statusBody(http.StatusNotFound, "NotFound",
-				t.resource+" \""+t.name+"\" not found")}
+			shape.labels = labels
+			shape.notFound = statusBody(http.StatusNotFound, "NotFound", t.resource+" \""+t.name+"\" not found")
 		}
 	}
 	// The key covers the query as sent upstream, required labels included.
 	key := cacheKey(r.URL.Path, query)
 
-	entry, status := h.resolve(r.Context(), key, r.URL.Path, query, ttl, gate)
+	entry, status := h.resolve(r.Context(), key, r.URL.Path, query, ttl, shape)
 	if entry == nil {
 		h.log.Error("upstream request failed", "path", r.URL.Path, "route", t.route())
 		writeStatus(w, http.StatusBadGateway, "InternalError",
@@ -128,9 +140,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.write(w, r, entry, query, ttl, status)
 }
 
-// authorize checks the allowlist and returns the resource's TTL and the labels
-// an object must carry to be served.
-func (h *Handler) authorize(t *target) (time.Duration, map[string]string, error) {
+// authorize checks the allowlist and returns the resource's TTL and its rule,
+// which is nil for discovery.
+func (h *Handler) authorize(t *target) (time.Duration, *config.Rule, error) {
 	// Non-resource paths (/api, /apis, /version, /openapi, and anything else
 	// off the resource surface) are forwarded, and the API server's own RBAC
 	// decides them. The service account is granted no nonResourceURLs, so it
@@ -170,15 +182,22 @@ func (h *Handler) authorize(t *target) (time.Duration, map[string]string, error)
 			return 0, nil, errors.New("reads of " + t.route() + " in namespace " + t.namespace + " are not permitted")
 		}
 	}
-	return rule.TTL.D(), rule.RequireLabels, nil
+	return rule.TTL.D(), rule, nil
 }
 
-// labelGate hides a single object that lacks the required labels.
-type labelGate struct {
+// shaping is what a rule changes in a response before it is cached.
+type shaping struct {
+	// list is true for a collection, false for a read by name.
+	list bool
+
+	// labels, on a read by name, hides an object without them.
 	labels map[string]string
 	// notFound is served both for an object without the labels and for one
 	// that does not exist, so a caller cannot tell the two apart.
 	notFound []byte
+
+	// remove is stripped from the object, or from each item of a list.
+	remove []*redact.Path
 }
 
 // requireLabels adds labels to the query's labelSelector. Selector terms are
@@ -226,7 +245,7 @@ func hasLabels(body []byte, labels map[string]string) bool {
 // resolve returns a cache entry, fetching upstream if needed, along with the
 // cache outcome. A nil entry means upstream failed and nothing usable was held.
 func (h *Handler) resolve(ctx context.Context, key, path string, query url.Values, ttl time.Duration,
-	gate *labelGate) (*cache.Entry, string) {
+	shape *shaping) (*cache.Entry, string) {
 	now := time.Now()
 
 	if entry, ok := h.cache.Get(key); ok {
@@ -239,7 +258,7 @@ func (h *Handler) resolve(ctx context.Context, key, path string, query url.Value
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
-				if _, err := h.fetch(ctx, key, path, query, ttl, gate); err != nil {
+				if _, err := h.fetch(ctx, key, path, query, ttl, shape); err != nil {
 					h.log.Warn("background refresh failed", "path", path, "error", err)
 				}
 			}()
@@ -247,7 +266,7 @@ func (h *Handler) resolve(ctx context.Context, key, path string, query url.Value
 		}
 	}
 
-	entry, err := h.fetch(ctx, key, path, query, ttl, gate)
+	entry, err := h.fetch(ctx, key, path, query, ttl, shape)
 	if err == nil {
 		return entry, "miss"
 	}
@@ -260,10 +279,10 @@ func (h *Handler) resolve(ctx context.Context, key, path string, query url.Value
 	return nil, "bypass"
 }
 
-// fetch reads upstream and caches the result. A non-nil gate replaces an object
-// without its labels with a 404 before caching, so the cache never holds it.
+// fetch reads upstream, shapes the response and caches the result. Shaping
+// happens first, so the cache never holds a hidden object or a removed field.
 func (h *Handler) fetch(ctx context.Context, key, path string, query url.Values, ttl time.Duration,
-	gate *labelGate) (*cache.Entry, error) {
+	shape *shaping) (*cache.Entry, error) {
 	resp, err := h.upstream.Get(ctx, key, path, query.Encode())
 	if err != nil {
 		return nil, err
@@ -278,14 +297,32 @@ func (h *Handler) fetch(ctx context.Context, key, path string, query url.Values,
 		StoredAt:        time.Now(),
 	}
 
-	if gate != nil && (resp.Status == http.StatusNotFound ||
-		resp.Status >= 200 && resp.Status < 300 && !hasLabels(resp.Body, gate.labels)) {
+	ok := resp.Status >= 200 && resp.Status < 300
+	if len(shape.labels) > 0 && (resp.Status == http.StatusNotFound || ok && !hasLabels(resp.Body, shape.labels)) {
 		entry = &cache.Entry{
 			Status:      http.StatusNotFound,
-			Body:        gate.notFound,
+			Body:        shape.notFound,
 			ContentType: "application/json",
 			StoredAt:    entry.StoredAt,
 		}
+		ok = false
+	}
+	if ok && len(shape.remove) > 0 {
+		body, err := redact.Apply(resp.Body, shape.remove, shape.list)
+		if err != nil {
+			// Fail closed: a rule that no longer fits the data might leak
+			// what it was meant to remove. Not cached, so a fix applies at once.
+			h.log.Error("response could not be redacted; refusing it", "path", path, "error", err)
+			return &cache.Entry{
+				Status:      http.StatusBadGateway,
+				Body:        statusBody(http.StatusBadGateway, "InternalError", "the proxy could not redact this response"),
+				ContentType: "application/json",
+				StoredAt:    entry.StoredAt,
+			}, nil
+		}
+		// The validator must follow the served body, or a client could see a
+		// removed field change through its ETag.
+		entry.Body, entry.ETag = body, upstream.ETag(body)
 	}
 
 	switch {

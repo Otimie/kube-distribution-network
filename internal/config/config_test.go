@@ -146,6 +146,20 @@ rules:
     requireLabels:
       KDN.io/public: "true"
 `,
+		"remove with bad path": `
+rules:
+  - version: v1
+    resource: nodes
+    ttl: "30s"
+    remove: ["status.images["]
+`,
+		"remove a field clients need": `
+rules:
+  - version: v1
+    resource: nodes
+    ttl: "30s"
+    remove: ["metadata.name"]
+`,
 		"cors credentials with any origin": `
 cors:
   allowedOrigin: "*"
