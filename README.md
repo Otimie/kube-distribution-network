@@ -51,6 +51,10 @@ per-caller identity, one cache entry serves everyone.
 So the `rules` allowlist is the authorization boundary: anything listed is
 readable by anyone who can reach the proxy. Don't list secrets.
 
+A rule with `requireLabels` narrows that to objects carrying those labels, which
+hands the decision to whoever can label them. See
+[Publishing by label](#publishing-by-label).
+
 It serves `GET`/`HEAD` only, is deny-by-default for resources, serves no
 subresources, and never forwards client credentials.
 
@@ -195,6 +199,82 @@ takes up to the longest `ttl` to apply everywhere.
 
 CORS doesn't widen what's readable. Anything in `rules` is already public to
 anyone who can reach the proxy; it only lets pages on that origin read it too.
+
+### Publishing by label
+
+A rule can require labels, so only objects their owners have opted in are
+served:
+
+```yaml
+rules:
+  - group: ""
+    version: v1
+    resource: namespaces
+    requireLabels:
+      kdn.io/public: "true"
+    ttl: "60s"
+```
+
+```sh
+kubectl label namespace default kdn.io/public=true
+```
+
+- **Lists** get the labels added to their `labelSelector`, so the API server
+  does the filtering and pagination and `remainingItemCount` describe only the
+  published objects. A client's own selector is ANDed with them, so it can only
+  narrow the result.
+- **Reads by name** of an object without the labels get the same 404, byte for
+  byte, as an object that doesn't exist, so names can't be probed.
+- **Removing the label** hides the object once cached copies expire: up to the
+  rule's `ttl`, or longer while stale copies cover an API server outage.
+
+The labels are a further condition, never a replacement: an object must match a
+rule *and* carry them, so labelling a Secret publishes nothing unless a rule
+allows secrets.
+
+Kubernetes RBAC can't restrict which labels someone sets, so **anyone who can
+update an object can publish it**. Restrict the label with a
+ValidatingAdmissionPolicy (GA in Kubernetes 1.30). For example, to let only the
+`kdn-publishers` group set or change it:
+
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kdn-public-label
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["*"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["*"]
+  matchConditions:
+    - name: not-a-publisher
+      expression: "!('kdn-publishers' in request.userInfo.groups)"
+  variables:
+    - name: label
+      expression: "'kdn.io/public'"
+  validations:
+    - expression: >-
+        (has(object.metadata.labels) && variables.label in object.metadata.labels
+          ? object.metadata.labels[variables.label] : '') ==
+        (oldObject != null && has(oldObject.metadata.labels) && variables.label in oldObject.metadata.labels
+          ? oldObject.metadata.labels[variables.label] : '')
+      message: only kdn-publishers may set or change the kdn.io/public label
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kdn-public-label
+spec:
+  policyName: kdn-public-label
+  validationActions: [Deny]
+```
+
+Narrow `resourceRules` to the resources your rules cover, and try it on a test
+cluster first: it applies to every matching write.
 
 ### Verify
 

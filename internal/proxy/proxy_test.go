@@ -412,3 +412,85 @@ func TestHeadReturnsHeadersWithoutBody(t *testing.T) {
 		t.Error("HEAD should still carry the validator")
 	}
 }
+
+// With requireLabels, lists are filtered by the API server: the labels join
+// the client's labelSelector, which can only narrow them.
+func TestRequireLabelsFiltersLists(t *testing.T) {
+	f := newFakeAPIServer(t)
+	h := newTestHandler(t, f, func(c *config.Config) {
+		c.Rules[0].RequireLabels = map[string]string{"kdn.io/public": "true"}
+	})
+
+	for path, want := range map[string]string{
+		"/api/v1/pods":                                     "kdn.io/public=true",
+		"/api/v1/namespaces/default/pods":                  "kdn.io/public=true",
+		"/api/v1/pods?labelSelector=app%3Dweb":             "kdn.io/public=true,app=web",
+		"/api/v1/pods?labelSelector=a%3D1&labelSelector=b": "kdn.io/public=true,a=1,b",
+		// A client cannot cancel the requirement; the terms are ANDed.
+		"/api/v1/pods?labelSelector=%21kdn.io%2Fpublic": "kdn.io/public=true,!kdn.io/public",
+	} {
+		if rec := do(h, http.MethodGet, path, nil); rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: got %d", path, rec.Code)
+		}
+		got := f.lastRequest().URL.Query()["labelSelector"]
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("GET %s: upstream labelSelector = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// A read by name of an object without the labels looks exactly like a read of
+// one that does not exist, so names cannot be probed.
+func TestRequireLabelsHidesObjects(t *testing.T) {
+	f := newFakeAPIServer(t)
+	h := newTestHandler(t, f, func(c *config.Config) {
+		c.Rules = append(c.Rules, config.Rule{
+			Version: "v1", Resource: "namespaces", TTL: config.Duration(30 * time.Second),
+			RequireLabels: map[string]string{"kdn.io/public": "true"},
+		})
+	})
+	get := func(path string, status int, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		f.mu.Lock()
+		f.status, f.body = status, body
+		f.mu.Unlock()
+		return do(h, http.MethodGet, path, nil)
+	}
+
+	public := `{"kind":"Namespace","metadata":{"name":"default","labels":{"kdn.io/public":"true"}}}`
+	if rec := get("/api/v1/namespaces/default", http.StatusOK, public); rec.Code != http.StatusOK ||
+		rec.Body.String() != public {
+		t.Errorf("labelled object: got %d %s", rec.Code, rec.Body.String())
+	}
+
+	unlabelled := get("/api/v1/namespaces/secret", http.StatusOK,
+		`{"kind":"Namespace","metadata":{"name":"secret","resourceVersion":"7","labels":{"kdn.io/public":"false"}}}`)
+	if unlabelled.Code != http.StatusNotFound {
+		t.Fatalf("unlabelled object: got %d, want 404", unlabelled.Code)
+	}
+	if strings.Contains(unlabelled.Body.String(), "resourceVersion") ||
+		unlabelled.Header().Get("ETag") != "" || unlabelled.Header().Get("X-Kdn-Resource-Version") != "" {
+		t.Errorf("unlabelled object leaked through: %s %v", unlabelled.Body.String(), unlabelled.Header())
+	}
+
+	// The API server's own 404 is replaced too, so the two cannot be told apart.
+	h.cache = cache.New(1 << 20) // the hidden 404 is cached; start fresh
+	missing := get("/api/v1/namespaces/secret", http.StatusNotFound, `{"kind":"Status","code":404,"details":{}}`)
+	if missing.Code != http.StatusNotFound || missing.Body.String() != unlabelled.Body.String() {
+		t.Errorf("missing object: got %d %s, want the same body as a hidden one: %s",
+			missing.Code, missing.Body.String(), unlabelled.Body.String())
+	}
+
+	// A body that cannot be checked is hidden, not served.
+	h.cache = cache.New(1 << 20)
+	if rec := get("/api/v1/namespaces/default", http.StatusOK, "not json"); rec.Code != http.StatusNotFound {
+		t.Errorf("unparseable object: got %d, want 404", rec.Code)
+	}
+
+	// Lists of the same resource are filtered upstream instead.
+	h.cache = cache.New(1 << 20)
+	get("/api/v1/namespaces", http.StatusOK, `{"kind":"NamespaceList","items":[]}`)
+	if got := f.lastRequest().URL.Query().Get("labelSelector"); got != "kdn.io/public=true" {
+		t.Errorf("namespace list: upstream labelSelector = %q", got)
+	}
+}

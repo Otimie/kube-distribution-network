@@ -122,6 +122,30 @@ rules:
     resource: nodes
     ttl: "30s"
 `,
+		"requireLabels with invalid key": `
+rules:
+  - version: v1
+    resource: nodes
+    ttl: "30s"
+    requireLabels:
+      "kdn.io/public,app": "true"
+`,
+		"requireLabels with selector in value": `
+rules:
+  - version: v1
+    resource: nodes
+    ttl: "30s"
+    requireLabels:
+      kdn.io/public: "true,!other"
+`,
+		"requireLabels with uppercase prefix": `
+rules:
+  - version: v1
+    resource: nodes
+    ttl: "30s"
+    requireLabels:
+      KDN.io/public: "true"
+`,
 		"cors credentials with any origin": `
 cors:
   allowedOrigin: "*"
@@ -151,6 +175,15 @@ rules:
 	for name, body := range cases {
 		if _, err := loadString(t, body); err == nil {
 			t.Errorf("%s: expected a validation error", name)
+		}
+	}
+}
+
+func TestRequireLabelsAccepted(t *testing.T) {
+	for _, labels := range []string{`public: "true"`, `kdn.io/public: "true"`, `app.kubernetes.io/part-of: web_1.2`, `kdn.io/public: ""`} {
+		body := "rules:\n  - version: v1\n    resource: nodes\n    ttl: \"30s\"\n    requireLabels:\n      " + labels + "\n"
+		if _, err := loadString(t, body); err != nil {
+			t.Errorf("requireLabels %s: %v", labels, err)
 		}
 	}
 }

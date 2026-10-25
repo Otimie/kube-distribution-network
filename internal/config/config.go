@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -128,6 +130,16 @@ type Rule struct {
 	// refused, since those would return objects from every namespace.
 	Namespaces []string `yaml:"namespaces"`
 
+	// RequireLabels publishes only objects carrying all of these labels, so
+	// owners opt objects in with e.g. kdn.io/public=true. Lists are filtered
+	// by the API server: the labels are added to the request's labelSelector,
+	// which a client's own selector can only narrow further. A read by name of
+	// an object without them gets the same 404 as one that does not exist.
+	//
+	// Anyone who can update an object can label it, so this delegates
+	// publishing to them. Guard the label keys with an admission policy.
+	RequireLabels map[string]string `yaml:"requireLabels"`
+
 	// TTL becomes max-age: how long the CDN and clients may serve this
 	// resource without revalidating. It is also the origin cache's freshness
 	// window. This is the main knob — a 30s TTL means the API server sees at
@@ -226,6 +238,14 @@ func (c *Config) Validate() error {
 		if r.TTL.D() <= 0 {
 			return fmt.Errorf("rules[%d] (%s): ttl must be positive", i, r.Resource)
 		}
+		for k, v := range r.RequireLabels {
+			if !validLabelKey(k) {
+				return fmt.Errorf("rules[%d] (%s): requireLabels: %q is not a valid label key", i, r.Resource, k)
+			}
+			if !validLabelValue(v) {
+				return fmt.Errorf("rules[%d] (%s): requireLabels: %q is not a valid value for label %q", i, r.Resource, v, k)
+			}
+		}
 		key := r.Group + "/" + r.Version + "/" + r.Resource
 		if seen[key] {
 			return fmt.Errorf("rules[%d]: duplicate rule for %s", i, key)
@@ -234,3 +254,24 @@ func (c *Config) Validate() error {
 	}
 	return nil
 }
+
+// Label syntax, as the API server enforces it. Validating it here also keeps a
+// required label from smuggling extra selector terms (",", "!", "in") into the
+// labelSelector the proxy builds from it.
+var (
+	labelName      = regexp.MustCompile(`^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$`)
+	labelKeyPrefix = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
+)
+
+// validLabelKey checks [prefix/]name, where the prefix is a DNS subdomain.
+func validLabelKey(k string) bool {
+	prefix, name, hasPrefix := strings.Cut(k, "/")
+	if !hasPrefix {
+		name, prefix = prefix, ""
+	} else if len(prefix) == 0 || len(prefix) > 253 || !labelKeyPrefix.MatchString(prefix) {
+		return false
+	}
+	return labelName.MatchString(name)
+}
+
+func validLabelValue(v string) bool { return v == "" || labelName.MatchString(v) }

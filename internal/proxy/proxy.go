@@ -97,16 +97,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ttl, err := h.authorize(t)
+	ttl, labels, err := h.authorize(t)
 	if err != nil {
 		writeStatus(w, http.StatusForbidden, "Forbidden", err.Error())
 		return
 	}
 
 	query := r.URL.Query()
+	var gate *labelGate
+	if len(labels) > 0 {
+		if t.name == "" {
+			// A list: the API server filters it, so pagination and
+			// remainingItemCount stay correct for the published set.
+			requireLabels(query, labels)
+		} else {
+			gate = &labelGate{labels: labels, notFound: statusBody(http.StatusNotFound, "NotFound",
+				t.resource+" \""+t.name+"\" not found")}
+		}
+	}
+	// The key covers the query as sent upstream, required labels included.
 	key := cacheKey(r.URL.Path, query)
 
-	entry, status := h.resolve(r.Context(), key, r.URL.Path, query, ttl)
+	entry, status := h.resolve(r.Context(), key, r.URL.Path, query, ttl, gate)
 	if entry == nil {
 		h.log.Error("upstream request failed", "path", r.URL.Path, "route", t.route())
 		writeStatus(w, http.StatusBadGateway, "InternalError",
@@ -116,8 +128,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.write(w, r, entry, query, ttl, status)
 }
 
-// authorize checks the allowlist and returns the resource's TTL.
-func (h *Handler) authorize(t *target) (time.Duration, error) {
+// authorize checks the allowlist and returns the resource's TTL and the labels
+// an object must carry to be served.
+func (h *Handler) authorize(t *target) (time.Duration, map[string]string, error) {
 	// Non-resource paths (/api, /apis, /version, /openapi, and anything else
 	// off the resource surface) are forwarded, and the API server's own RBAC
 	// decides them. The service account is granted no nonResourceURLs, so it
@@ -126,7 +139,7 @@ func (h *Handler) authorize(t *target) (time.Duration, error) {
 	// /healthz and /version. The CDN Worker additionally restricts which path
 	// prefixes reach the origin at all.
 	if t.discovery {
-		return discoveryTTL, nil
+		return discoveryTTL, nil, nil
 	}
 
 	var rule *config.Rule
@@ -137,32 +150,83 @@ func (h *Handler) authorize(t *target) (time.Duration, error) {
 		}
 	}
 	if rule == nil {
-		return 0, errors.New(t.route() + " is not in this proxy's allowlist")
+		return 0, nil, errors.New(t.route() + " is not in this proxy's allowlist")
 	}
 
 	// Subresources are not served. A readable resource does not imply its
 	// subresources are readable -- pods/log exposes far more than a pod object.
 	if t.subresource != "" {
-		return 0, errors.New("the " + t.subresource + " subresource is not served by this proxy")
+		return 0, nil, errors.New("the " + t.subresource + " subresource is not served by this proxy")
 	}
 
 	if len(rule.Namespaces) > 0 {
 		// A cluster-wide read would return objects from every namespace,
 		// including ones outside this rule's list.
 		if t.namespace == "" {
-			return 0, errors.New("reads of " + t.route() + " are restricted to specific namespaces, " +
+			return 0, nil, errors.New("reads of " + t.route() + " are restricted to specific namespaces, " +
 				"so a cluster-wide read is not permitted; request a namespace instead")
 		}
 		if !namespaceAllowed(rule.Namespaces, t.namespace) {
-			return 0, errors.New("reads of " + t.route() + " in namespace " + t.namespace + " are not permitted")
+			return 0, nil, errors.New("reads of " + t.route() + " in namespace " + t.namespace + " are not permitted")
 		}
 	}
-	return rule.TTL.D(), nil
+	return rule.TTL.D(), rule.RequireLabels, nil
+}
+
+// labelGate hides a single object that lacks the required labels.
+type labelGate struct {
+	labels map[string]string
+	// notFound is served both for an object without the labels and for one
+	// that does not exist, so a caller cannot tell the two apart.
+	notFound []byte
+}
+
+// requireLabels adds labels to the query's labelSelector. Selector terms are
+// ANDed, so a client's own selector can only narrow the result. Several
+// labelSelector parameters are folded into one, so none is ignored upstream.
+func requireLabels(query url.Values, labels map[string]string) {
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	terms := make([]string, 0, len(keys)+len(query["labelSelector"]))
+	for _, k := range keys {
+		terms = append(terms, k+"="+labels[k])
+	}
+	for _, v := range query["labelSelector"] {
+		if v = strings.TrimSpace(v); v != "" {
+			terms = append(terms, v)
+		}
+	}
+	query.Set("labelSelector", strings.Join(terms, ","))
+}
+
+// hasLabels reports whether a JSON object carries all of labels. A body that
+// does not parse fails the check, so an unexpected response is hidden rather
+// than served.
+func hasLabels(body []byte, labels map[string]string) bool {
+	var obj struct {
+		Metadata struct {
+			Labels map[string]string `json:"labels"`
+		} `json:"metadata"`
+	}
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return false
+	}
+	for k, v := range labels {
+		if got, ok := obj.Metadata.Labels[k]; !ok || got != v {
+			return false
+		}
+	}
+	return true
 }
 
 // resolve returns a cache entry, fetching upstream if needed, along with the
 // cache outcome. A nil entry means upstream failed and nothing usable was held.
-func (h *Handler) resolve(ctx context.Context, key, path string, query url.Values, ttl time.Duration) (*cache.Entry, string) {
+func (h *Handler) resolve(ctx context.Context, key, path string, query url.Values, ttl time.Duration,
+	gate *labelGate) (*cache.Entry, string) {
 	now := time.Now()
 
 	if entry, ok := h.cache.Get(key); ok {
@@ -175,7 +239,7 @@ func (h *Handler) resolve(ctx context.Context, key, path string, query url.Value
 			go func() {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
-				if _, err := h.fetch(ctx, key, path, query, ttl); err != nil {
+				if _, err := h.fetch(ctx, key, path, query, ttl, gate); err != nil {
 					h.log.Warn("background refresh failed", "path", path, "error", err)
 				}
 			}()
@@ -183,7 +247,7 @@ func (h *Handler) resolve(ctx context.Context, key, path string, query url.Value
 		}
 	}
 
-	entry, err := h.fetch(ctx, key, path, query, ttl)
+	entry, err := h.fetch(ctx, key, path, query, ttl, gate)
 	if err == nil {
 		return entry, "miss"
 	}
@@ -196,8 +260,10 @@ func (h *Handler) resolve(ctx context.Context, key, path string, query url.Value
 	return nil, "bypass"
 }
 
-// fetch reads upstream and caches the result.
-func (h *Handler) fetch(ctx context.Context, key, path string, query url.Values, ttl time.Duration) (*cache.Entry, error) {
+// fetch reads upstream and caches the result. A non-nil gate replaces an object
+// without its labels with a 404 before caching, so the cache never holds it.
+func (h *Handler) fetch(ctx context.Context, key, path string, query url.Values, ttl time.Duration,
+	gate *labelGate) (*cache.Entry, error) {
 	resp, err := h.upstream.Get(ctx, key, path, query.Encode())
 	if err != nil {
 		return nil, err
@@ -210,6 +276,16 @@ func (h *Handler) fetch(ctx context.Context, key, path string, query url.Values,
 		ETag:            resp.ETag,
 		ResourceVersion: resp.ResourceVersion,
 		StoredAt:        time.Now(),
+	}
+
+	if gate != nil && (resp.Status == http.StatusNotFound ||
+		resp.Status >= 200 && resp.Status < 300 && !hasLabels(resp.Body, gate.labels)) {
+		entry = &cache.Entry{
+			Status:      http.StatusNotFound,
+			Body:        gate.notFound,
+			ContentType: "application/json",
+			StoredAt:    entry.StoredAt,
+		}
 	}
 
 	switch {
@@ -325,6 +401,19 @@ func cacheKey(path string, query url.Values) string {
 // writeStatus renders a Kubernetes Status object, so client-go produces a typed
 // error rather than failing to parse an unexpected body.
 func writeStatus(w http.ResponseWriter, code int, reason, message string) {
+	body := statusBody(code, reason, message)
+
+	w.Header().Set("Content-Type", "application/json")
+	// Refusals are config-dependent, so neither the CDN nor a client should
+	// hold on to them.
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(code)
+	_, _ = w.Write(body)
+}
+
+// statusBody is a Kubernetes Status object as JSON.
+func statusBody(code int, reason, message string) []byte {
 	body, _ := json.Marshal(map[string]any{
 		"kind":       "Status",
 		"apiVersion": "v1",
@@ -334,15 +423,7 @@ func writeStatus(w http.ResponseWriter, code int, reason, message string) {
 		"reason":     reason,
 		"code":       code,
 	})
-	body = append(body, '\n')
-
-	w.Header().Set("Content-Type", "application/json")
-	// Refusals are config-dependent, so neither the CDN nor a client should
-	// hold on to them.
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	w.WriteHeader(code)
-	_, _ = w.Write(body)
+	return append(body, '\n')
 }
 
 // namespaceAllowed matches a namespace against exact names and trailing-"*"

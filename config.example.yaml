@@ -67,5 +67,17 @@ rules:
     resource: deployments
     ttl: "30s"
 
+  # requireLabels publishes only objects that carry these labels: lists are
+  # filtered by the API server, and a read by name of an unlabelled object gets
+  # the same 404 as a missing one. Opt objects in with
+  # `kubectl label namespace default kdn.io/public=true`. Anyone who can update
+  # an object can label it, so guard the label (see the README).
+  # - group: ""
+  #   version: v1
+  #   resource: namespaces
+  #   requireLabels:
+  #     kdn.io/public: "true"
+  #   ttl: "60s"
+
 # Deliberately absent: secrets, serviceaccounts, and anything else whose
 # contents are credentials.
